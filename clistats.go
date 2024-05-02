@@ -3,12 +3,13 @@ package clistats
 import (
 	"context"
 	"fmt"
+	jsoniter "github.com/json-iterator/go"
 	"io"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
 	"github.com/projectdiscovery/freeport"
 	errorutil "github.com/projectdiscovery/utils/errors"
 )
@@ -117,55 +118,61 @@ func NewWithOptions(ctx context.Context, options *Options) (*Statistics, error) 
 	return statistics, nil
 }
 
+var (
+	once sync.Once
+)
+
 // Start starts the event loop of the stats client.
 func (s *Statistics) Start() error {
 	if s.Options.Web {
-		http.HandleFunc("/metrics", func(w http.ResponseWriter, req *http.Request) {
-			items := make(map[string]interface{})
-			for k, v := range s.counters {
-				items[k] = v.Load()
-			}
-			for k, v := range s.static {
-				items[k] = v
-			}
-			for k, v := range s.dynamic {
-				items[k] = v(s)
-			}
-
-			// Common fields
-			requests, hasRequests := s.GetCounter("requests")
-			startedAt, hasStartedAt := s.GetStatic("startedAt")
-			total, hasTotal := s.GetCounter("total")
-			var (
-				duration    time.Duration
-				hasDuration bool
-			)
-			// duration
-			if hasStartedAt {
-				if stAt, ok := startedAt.(time.Time); ok {
-					duration = time.Since(stAt)
-					items["duration"] = FmtDuration(duration)
-					hasDuration = true
+		once.Do(func() {
+			http.HandleFunc("/metrics", func(w http.ResponseWriter, req *http.Request) {
+				items := make(map[string]interface{})
+				for k, v := range s.counters {
+					items[k] = v.Load()
 				}
-			}
-			// rps
-			if hasRequests && hasDuration {
-				items["rps"] = String(uint64(float64(requests) / duration.Seconds()))
-			}
-			// percent
-			if hasRequests && hasTotal {
-				percentData := (float64(requests) * float64(100)) / float64(total)
-				percent := String(uint64(percentData))
-				items["percent"] = percent
-			}
+				for k, v := range s.static {
+					items[k] = v
+				}
+				for k, v := range s.dynamic {
+					items[k] = v(s)
+				}
 
-			data, err := jsoniter.Marshal(items)
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err)))
-				return
-			}
-			_, _ = w.Write(data)
+				// Common fields
+				requests, hasRequests := s.GetCounter("requests")
+				startedAt, hasStartedAt := s.GetStatic("startedAt")
+				total, hasTotal := s.GetCounter("total")
+				var (
+					duration    time.Duration
+					hasDuration bool
+				)
+				// duration
+				if hasStartedAt {
+					if stAt, ok := startedAt.(time.Time); ok {
+						duration = time.Since(stAt)
+						items["duration"] = FmtDuration(duration)
+						hasDuration = true
+					}
+				}
+				// rps
+				if hasRequests && hasDuration {
+					items["rps"] = String(uint64(float64(requests) / duration.Seconds()))
+				}
+				// percent
+				if hasRequests && hasTotal {
+					percentData := (float64(requests) * float64(100)) / float64(total)
+					percent := String(uint64(percentData))
+					items["percent"] = percent
+				}
+
+				data, err := jsoniter.Marshal(items)
+				if err != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(fmt.Sprintf(`{"error":"%s"}`, err)))
+					return
+				}
+				_, _ = w.Write(data)
+			})
 		})
 
 		// check if the default port is available
